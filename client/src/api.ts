@@ -61,4 +61,22 @@ export const api = {
     if (endDate) params.set('end_date', endDate);
     return request(`/admin/stats?${params.toString()}`);
   },
+  getAdminDoctors: () => request('/admin/doctors'),
+
+  // Admin Schedule Management
+  getSchedules: (params?: { department_id?: number; doctor_id?: number; date?: string }) => {
+    const search = new URLSearchParams();
+    if (params?.department_id) search.set('department_id', String(params.department_id));
+    if (params?.doctor_id) search.set('doctor_id', String(params.doctor_id));
+    if (params?.date) search.set('date', params.date);
+    return request(`/admin/schedules?${search.toString()}`);
+  },
+  getSchedulesDoctors: (departmentId: number) => request(`/admin/schedules/doctors/${departmentId}`),
+  createSchedule: (body: { doctor_id: number; date: string; start_time: string; end_time: string; max_appointments?: number }) =>
+    request('/admin/schedules', { method: 'POST', body: JSON.stringify(body) }),
+  createScheduleBatch: (body: { doctor_id: number; date: string; slots: Array<{ start_time: string; end_time: string; max_appointments?: number }> }) =>
+    request('/admin/schedules/batch', { method: 'POST', body: JSON.stringify(body) }),
+  deleteSchedule: (id: number) => request(`/admin/schedules/${id}`, { method: 'DELETE' }),
+  deleteDoctorDateSchedules: (body: { doctor_id: number; date: string }) =>
+    request('/admin/schedules', { method: 'DELETE', body: JSON.stringify(body) }),
 };

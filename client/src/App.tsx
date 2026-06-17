@@ -364,7 +364,7 @@ function BookingPage({ doctorId, doctorName, deptName }: { doctorId: number; doc
   const [loading, setLoading] = useState(false);
   const [dates] = useState(() => {
     const d: string[] = [];
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 14; i++) {
       const dt = new Date();
       dt.setDate(dt.getDate() + i);
       d.push(dt.toISOString().slice(0, 10));
@@ -835,10 +835,395 @@ function QueueOverviewPage() {
   );
 }
 
+// ============ Schedule Management (Admin) ============
+interface ScheduleItem {
+  id: number;
+  doctor_id: number;
+  date: string;
+  start_time: string;
+  end_time: string;
+  max_appointments: number;
+  current_appointments: number;
+  doctor_name: string;
+  doctor_title: string;
+  department_id: number;
+  department_name: string;
+}
+
+function ScheduleManagement() {
+  const { show } = useToast();
+  const [departments, setDepartments] = useState<Department[]>([]);
+  const [doctors, setDoctors] = useState<Doctor[]>([]);
+  const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [filters, setFilters] = useState({
+    department_id: '' as string,
+    doctor_id: '' as string,
+    date: new Date().toISOString().slice(0, 10),
+  });
+  const [createForm, setCreateForm] = useState({
+    department_id: '' as string,
+    doctor_id: '' as string,
+    date: new Date().toISOString().slice(0, 10),
+    mode: 'batch' as 'single' | 'batch',
+    start_time: '08:00',
+    end_time: '08:30',
+    max_appointments: 10,
+    // Batch fields
+    period: 'morning' as 'morning' | 'afternoon' | 'full',
+    slot_duration: 30,
+    slot_max: 10,
+  });
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    api.getDepartments().then(setDepartments).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (filters.department_id) {
+      api.getSchedulesDoctors(Number(filters.department_id)).then(setDoctors as any).catch(() => {});
+    } else {
+      setDoctors([]);
+    }
+  }, [filters.department_id]);
+
+  useEffect(() => {
+    if (createForm.department_id) {
+      api.getSchedulesDoctors(Number(createForm.department_id)).then(setDoctors as any).catch(() => {});
+    }
+  }, [createForm.department_id]);
+
+  const loadSchedules = () => {
+    setLoading(true);
+    const params: any = {};
+    if (filters.department_id) params.department_id = Number(filters.department_id);
+    if (filters.doctor_id) params.doctor_id = Number(filters.doctor_id);
+    if (filters.date) params.date = filters.date;
+    api.getSchedules(params).then(setSchedules as any).catch(() => {}).finally(() => setLoading(false));
+  };
+  useEffect(loadSchedules, []);
+
+  const handleDelete = async (id: number) => {
+    if (!confirm('确定删除该时段？')) return;
+    try {
+      await api.deleteSchedule(id);
+      show('删除成功', 'success');
+      loadSchedules();
+    } catch (err: any) {
+      show(err.message, 'error');
+    }
+  };
+
+  const handleDeleteAll = () => {
+    if (!createForm.doctor_id || !createForm.date) {
+      show('请选择医生和日期', 'error');
+      return;
+    }
+    if (!confirm(`确定删除该医生 ${createForm.date} 的所有排班？`)) return;
+    api.deleteDoctorDateSchedules({
+      doctor_id: Number(createForm.doctor_id),
+      date: createForm.date,
+    }).then(() => {
+      show('已清空该医生当日排班', 'success');
+      loadSchedules();
+    }).catch((err: any) => show(err.message, 'error'));
+  };
+
+  const generateBatchSlots = () => {
+    const { period, slot_duration, slot_max } = createForm;
+    const slots: Array<{ start_time: string; end_time: string; max_appointments: number }> = [];
+
+    const ranges: Array<[string, string]> = [];
+    if (period === 'morning' || period === 'full') {
+      ranges.push(['08:00', '11:30']);
+    }
+    if (period === 'afternoon' || period === 'full') {
+      ranges.push(['14:00', '17:00']);
+    }
+
+    for (const [rangeStart, rangeEnd] of ranges) {
+      let cur = rangeStart;
+      while (cur < rangeEnd) {
+        const [h, m] = cur.split(':').map(Number);
+        const endMin = m + slot_duration;
+        const endH = h + Math.floor(endMin / 60);
+        const endM = endMin % 60;
+        const end = `${String(endH).padStart(2, '0')}:${String(endM).padStart(2, '0')}`;
+        if (end > rangeEnd) break;
+        slots.push({ start_time: cur, end_time: end, max_appointments: slot_max });
+        cur = end;
+      }
+    }
+    return slots;
+  };
+
+  const handleCreate = async () => {
+    if (!createForm.doctor_id || !createForm.date) {
+      show('请选择医生和日期', 'error');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      if (createForm.mode === 'single') {
+        if (!createForm.start_time || !createForm.end_time) {
+          show('请填写时段', 'error');
+          return;
+        }
+        await api.createSchedule({
+          doctor_id: Number(createForm.doctor_id),
+          date: createForm.date,
+          start_time: createForm.start_time,
+          end_time: createForm.end_time,
+          max_appointments: createForm.max_appointments,
+        });
+        show('排班创建成功', 'success');
+      } else {
+        const slots = generateBatchSlots();
+        if (slots.length === 0) {
+          show('没有生成任何时段', 'error');
+          return;
+        }
+        const res: any = await api.createScheduleBatch({
+          doctor_id: Number(createForm.doctor_id),
+          date: createForm.date,
+          slots,
+        });
+        show(res.message, res.skipped > 0 ? 'info' : 'success');
+      }
+      loadSchedules();
+    } catch (err: any) {
+      show(err.message, 'error');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Group schedules by doctor
+  const groupedByDoctor = schedules.reduce((acc: Record<string, ScheduleItem[]>, s) => {
+    const key = `${s.doctor_id}_${s.date}`;
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(s);
+    return acc;
+  }, {});
+
+  return (
+    <div className="container">
+      <div className="page-title">排班管理</div>
+
+      {/* Filter Bar */}
+      <div className="card mb-16">
+        <div className="card-title">查询筛选</div>
+        <div className="flex gap-12 items-end" style={{ flexWrap: 'wrap' }}>
+          <div className="form-group" style={{ margin: 0, minWidth: 180 }}>
+            <label className="form-label">科室</label>
+            <select className="form-input" value={filters.department_id}
+              onChange={e => setFilters({ ...filters, department_id: e.target.value, doctor_id: '' })}>
+              <option value="">全部科室</option>
+              {departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+            </select>
+          </div>
+          <div className="form-group" style={{ margin: 0, minWidth: 180 }}>
+            <label className="form-label">医生</label>
+            <select className="form-input" value={filters.doctor_id} disabled={!filters.department_id}
+              onChange={e => setFilters({ ...filters, doctor_id: e.target.value })}>
+              <option value="">全部医生</option>
+              {doctors.map(d => <option key={d.id} value={d.id}>{d.name} ({d.title})</option>)}
+            </select>
+          </div>
+          <div className="form-group" style={{ margin: 0, minWidth: 180 }}>
+            <label className="form-label">日期</label>
+            <input className="form-input" type="date" value={filters.date}
+              onChange={e => setFilters({ ...filters, date: e.target.value })} />
+          </div>
+          <div className="flex gap-8">
+            <button className="btn btn-primary" onClick={loadSchedules} disabled={loading}>
+              {loading ? '查询中...' : '查询'}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Create Form */}
+      <div className="card mb-16">
+        <div className="card-title">配置排班</div>
+        <div className="flex gap-12 items-end" style={{ flexWrap: 'wrap', marginBottom: 16 }}>
+          <div className="form-group" style={{ margin: 0, minWidth: 180 }}>
+            <label className="form-label">科室</label>
+            <select className="form-input" value={createForm.department_id}
+              onChange={e => setCreateForm({ ...createForm, department_id: e.target.value, doctor_id: '' })}>
+              <option value="">请选择科室</option>
+              {departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+            </select>
+          </div>
+          <div className="form-group" style={{ margin: 0, minWidth: 180 }}>
+            <label className="form-label">医生</label>
+            <select className="form-input" value={createForm.doctor_id} disabled={!createForm.department_id}
+              onChange={e => setCreateForm({ ...createForm, doctor_id: e.target.value })}>
+              <option value="">请选择医生</option>
+              {doctors.map(d => <option key={d.id} value={d.id}>{d.name} ({d.title})</option>)}
+            </select>
+          </div>
+          <div className="form-group" style={{ margin: 0, minWidth: 180 }}>
+            <label className="form-label">排班日期</label>
+            <input className="form-input" type="date" value={createForm.date}
+              onChange={e => setCreateForm({ ...createForm, date: e.target.value })} />
+          </div>
+        </div>
+
+        <div className="flex gap-8 mb-16">
+          <button className={`btn ${createForm.mode === 'batch' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => setCreateForm({ ...createForm, mode: 'batch' })}>
+            批量生成
+          </button>
+          <button className={`btn ${createForm.mode === 'single' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => setCreateForm({ ...createForm, mode: 'single' })}>
+            单个添加
+          </button>
+        </div>
+
+        {createForm.mode === 'batch' ? (
+          <div className="flex gap-12 items-end" style={{ flexWrap: 'wrap', marginBottom: 16 }}>
+            <div className="form-group" style={{ margin: 0, minWidth: 150 }}>
+              <label className="form-label">时段</label>
+              <select className="form-input" value={createForm.period}
+                onChange={e => setCreateForm({ ...createForm, period: e.target.value as any })}>
+                <option value="morning">上午</option>
+                <option value="afternoon">下午</option>
+                <option value="full">全天</option>
+              </select>
+            </div>
+            <div className="form-group" style={{ margin: 0, minWidth: 150 }}>
+              <label className="form-label">每段时长(分钟)</label>
+              <select className="form-input" value={createForm.slot_duration}
+                onChange={e => setCreateForm({ ...createForm, slot_duration: Number(e.target.value) })}>
+                <option value={15}>15</option>
+                <option value={20}>20</option>
+                <option value={30}>30</option>
+                <option value={45}>45</option>
+                <option value={60}>60</option>
+              </select>
+            </div>
+            <div className="form-group" style={{ margin: 0, minWidth: 150 }}>
+              <label className="form-label">每段最大预约数</label>
+              <input className="form-input" type="number" min={1} max={100}
+                value={createForm.slot_max}
+                onChange={e => setCreateForm({ ...createForm, slot_max: Number(e.target.value) })} />
+            </div>
+          </div>
+        ) : (
+          <div className="flex gap-12 items-end" style={{ flexWrap: 'wrap', marginBottom: 16 }}>
+            <div className="form-group" style={{ margin: 0, minWidth: 150 }}>
+              <label className="form-label">开始时间</label>
+              <input className="form-input" type="time" value={createForm.start_time}
+                onChange={e => setCreateForm({ ...createForm, start_time: e.target.value })} />
+            </div>
+            <div className="form-group" style={{ margin: 0, minWidth: 150 }}>
+              <label className="form-label">结束时间</label>
+              <input className="form-input" type="time" value={createForm.end_time}
+                onChange={e => setCreateForm({ ...createForm, end_time: e.target.value })} />
+            </div>
+            <div className="form-group" style={{ margin: 0, minWidth: 150 }}>
+              <label className="form-label">最大预约数</label>
+              <input className="form-input" type="number" min={1} max={100}
+                value={createForm.max_appointments}
+                onChange={e => setCreateForm({ ...createForm, max_appointments: Number(e.target.value) })} />
+            </div>
+          </div>
+        )}
+
+        <div className="flex gap-8">
+          <button className="btn btn-primary" onClick={handleCreate} disabled={submitting}>
+            {submitting ? '保存中...' : createForm.mode === 'batch' ? '生成排班' : '添加时段'}
+          </button>
+          <button className="btn btn-danger" onClick={handleDeleteAll}>
+            清空医生当日排班
+          </button>
+        </div>
+      </div>
+
+      {/* Schedule List */}
+      <div className="card">
+        <div className="card-title">排班列表 {schedules.length > 0 && <span className="badge badge-primary ml-8">{schedules.length} 个时段</span>}</div>
+        {loading ? (
+          <div className="loading"><div className="spinner" />加载中...</div>
+        ) : schedules.length === 0 ? (
+          <div className="empty-state"><p>暂无排班数据</p></div>
+        ) : (
+          <div>
+            {Object.entries(groupedByDoctor).map(([key, items]) => {
+              const first = items[0];
+              const sorted = [...items].sort((a, b) => a.start_time.localeCompare(b.start_time));
+              const morning = sorted.filter(s => s.start_time < '12:00');
+              const afternoon = sorted.filter(s => s.start_time >= '12:00');
+              return (
+                <div key={key} className="mb-24" style={{ borderBottom: '1px solid #e2e8f0', paddingBottom: 16 }}>
+                  <div className="flex justify-between items-center mb-8">
+                    <div>
+                      <span className="font-bold text-lg">{first.doctor_name}</span>
+                      <span className="text-sm text-gray ml-8">{first.doctor_title}</span>
+                      <span className="text-sm text-gray ml-16">{first.department_name}</span>
+                      <span className="badge badge-primary ml-16">{first.date}</span>
+                    </div>
+                  </div>
+                  {morning.length > 0 && (
+                    <div className="mb-12">
+                      <div className="text-sm text-gray mb-8">上午</div>
+                      <div className="slots-grid">
+                        {morning.map(s => (
+                          <div key={s.id} className="slot-item-wrapper">
+                            <div className={`slot-btn ${s.current_appointments >= s.max_appointments ? 'slot-full' : ''}`}>
+                              {s.start_time}-{s.end_time}
+                              <span style={{ fontSize: 11, marginLeft: 4, opacity: 0.7 }}>
+                                {s.current_appointments}/{s.max_appointments}
+                              </span>
+                              <button
+                                className="slot-delete-btn"
+                                onClick={() => handleDelete(s.id)}
+                                title="删除"
+                              >×</button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {afternoon.length > 0 && (
+                    <div>
+                      <div className="text-sm text-gray mb-8">下午</div>
+                      <div className="slots-grid">
+                        {afternoon.map(s => (
+                          <div key={s.id} className="slot-item-wrapper">
+                            <div className={`slot-btn ${s.current_appointments >= s.max_appointments ? 'slot-full' : ''}`}>
+                              {s.start_time}-{s.end_time}
+                              <span style={{ fontSize: 11, marginLeft: 4, opacity: 0.7 }}>
+                                {s.current_appointments}/{s.max_appointments}
+                              </span>
+                              <button
+                                className="slot-delete-btn"
+                                onClick={() => handleDelete(s.id)}
+                                title="删除"
+                              >×</button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ============ Admin Dashboard ============
 function AdminDashboard() {
   const { navigate } = useRouter();
-  const [tab, setTab] = useState<'queue' | 'stats'>('queue');
+  const [tab, setTab] = useState<'queue' | 'stats' | 'schedule'>('queue');
   const [queues, setQueues] = useState<any[]>([]);
   const [stats, setStats] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -851,149 +1236,158 @@ function AdminDashboard() {
     if (tab === 'queue') {
       setLoading(true);
       api.getAdminQueues().then(setQueues).catch(() => {}).finally(() => setLoading(false));
-    } else {
+    } else if (tab === 'stats') {
       setLoading(true);
       api.getAdminStats(dateRange.start, dateRange.end).then(setStats).catch(() => {}).finally(() => setLoading(false));
     }
   }, [tab, dateRange]);
 
   return (
-    <div className="container">
-      <div className="page-title">管理员后台</div>
+    <div>
+      <div className="container">
+        <div className="page-title">管理员后台</div>
 
-      <div className="flex gap-8 mb-16">
-        <button className={`btn ${tab === 'queue' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setTab('queue')}>排队监控</button>
-        <button className={`btn ${tab === 'stats' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setTab('stats')}>挂号统计</button>
-        <button className="btn btn-ghost" onClick={() => navigate({ page: 'queue-overview' })}>排队大屏</button>
+        <div className="flex gap-8 mb-16">
+          <button className={`btn ${tab === 'queue' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setTab('queue')}>排队监控</button>
+          <button className={`btn ${tab === 'stats' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setTab('stats')}>挂号统计</button>
+          <button className={`btn ${tab === 'schedule' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setTab('schedule')}>排班管理</button>
+          <button className="btn btn-ghost" onClick={() => navigate({ page: 'queue-overview' })}>排队大屏</button>
+        </div>
       </div>
 
-      {tab === 'stats' && (
-        <div className="flex gap-12 items-center mb-16">
-          <div className="form-group" style={{ margin: 0 }}>
-            <label className="form-label">起始日期</label>
-            <input className="form-input" type="date" value={dateRange.start}
-              onChange={e => setDateRange({ ...dateRange, start: e.target.value })} />
-          </div>
-          <div className="form-group" style={{ margin: 0 }}>
-            <label className="form-label">结束日期</label>
-            <input className="form-input" type="date" value={dateRange.end}
-              onChange={e => setDateRange({ ...dateRange, end: e.target.value })} />
-          </div>
+      {tab === 'schedule' ? (
+        <ScheduleManagement />
+      ) : (
+        <div className="container">
+          {tab === 'stats' && (
+            <div className="flex gap-12 items-center mb-16">
+              <div className="form-group" style={{ margin: 0 }}>
+                <label className="form-label">起始日期</label>
+                <input className="form-input" type="date" value={dateRange.start}
+                  onChange={e => setDateRange({ ...dateRange, start: e.target.value })} />
+              </div>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label className="form-label">结束日期</label>
+                <input className="form-input" type="date" value={dateRange.end}
+                  onChange={e => setDateRange({ ...dateRange, end: e.target.value })} />
+              </div>
+            </div>
+          )}
+
+          {loading ? (
+            <div className="loading"><div className="spinner" />加载中...</div>
+          ) : tab === 'queue' ? (
+            <>
+              <div className="grid grid-4 mb-24">
+                <div className="card stat-card">
+                  <div className="stat-number" style={{ color: '#f59e0b' }}>
+                    {queues.reduce((s, d) => s + d.total_waiting, 0)}
+                  </div>
+                  <div className="stat-desc">总等待人数</div>
+                </div>
+                <div className="card stat-card">
+                  <div className="stat-number" style={{ color: '#16a34a' }}>
+                    {queues.reduce((s, d) => s + d.total_completed, 0)}
+                  </div>
+                  <div className="stat-desc">总已完成</div>
+                </div>
+                <div className="card stat-card">
+                  <div className="stat-number">{queues.length}</div>
+                  <div className="stat-desc">科室数</div>
+                </div>
+                <div className="card stat-card">
+                  <div className="stat-number">{queues.reduce((s, d) => s + d.doctors.length, 0)}</div>
+                  <div className="stat-desc">今日在岗医生</div>
+                </div>
+              </div>
+
+              {queues.map(dept => (
+                <div key={dept.id} className="card mb-16">
+                  <div className="card-title">{dept.name}</div>
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr><th>医生</th><th>职称</th><th>当前叫号</th><th>当前患者</th><th>等待</th><th>已完成</th></tr>
+                      </thead>
+                      <tbody>
+                        {dept.doctors.map((doc: any) => (
+                          <tr key={doc.id}>
+                            <td className="font-bold">{doc.name}</td>
+                            <td>{doc.title}</td>
+                            <td className="text-primary font-bold">{doc.current_number || '-'}</td>
+                            <td>{doc.current_patient || '-'}</td>
+                            <td><span className="badge badge-warning">{doc.waiting}</span></td>
+                            <td><span className="badge badge-success">{doc.completed}</span></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ))}
+            </>
+          ) : stats && (
+            <>
+              <div className="grid grid-4 mb-24">
+                <div className="card stat-card">
+                  <div className="stat-number">{stats.total?.total || 0}</div>
+                  <div className="stat-desc">总挂号量</div>
+                </div>
+                <div className="card stat-card">
+                  <div className="stat-number" style={{ color: '#16a34a' }}>{stats.total?.completed || 0}</div>
+                  <div className="stat-desc">已完成</div>
+                </div>
+                <div className="card stat-card">
+                  <div className="stat-number" style={{ color: '#f59e0b' }}>{(stats.total?.waiting || 0) + (stats.total?.serving || 0)}</div>
+                  <div className="stat-desc">进行中</div>
+                </div>
+                <div className="card stat-card">
+                  <div className="stat-number" style={{ color: '#dc2626' }}>{stats.total?.cancelled || 0}</div>
+                  <div className="stat-desc">已取消</div>
+                </div>
+              </div>
+
+              <div className="card mb-16">
+                <div className="card-title">各科室挂号量</div>
+                <div className="table-wrap">
+                  <table>
+                    <thead><tr><th>科室</th><th>总挂号量</th><th>已完成</th></tr></thead>
+                    <tbody>
+                      {stats.by_department?.map((d: any, i: number) => (
+                        <tr key={i}>
+                          <td className="font-bold">{d.department_name}</td>
+                          <td>{d.total}</td>
+                          <td className="text-success">{d.completed}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="card">
+                <div className="card-title">每日明细</div>
+                <div className="table-wrap">
+                  <table>
+                    <thead><tr><th>日期</th><th>科室</th><th>总数</th><th>已完成</th><th>已取消</th><th>进行中</th></tr></thead>
+                    <tbody>
+                      {stats.daily?.map((d: any, i: number) => (
+                        <tr key={i}>
+                          <td>{d.date}</td>
+                          <td>{d.department_name}</td>
+                          <td>{d.total}</td>
+                          <td className="text-success">{d.completed}</td>
+                          <td className="text-danger">{d.cancelled}</td>
+                          <td>{d.pending}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </>
+          )}
         </div>
-      )}
-
-      {loading ? (
-        <div className="loading"><div className="spinner" />加载中...</div>
-      ) : tab === 'queue' ? (
-        <>
-          <div className="grid grid-4 mb-24">
-            <div className="card stat-card">
-              <div className="stat-number" style={{ color: '#f59e0b' }}>
-                {queues.reduce((s, d) => s + d.total_waiting, 0)}
-              </div>
-              <div className="stat-desc">总等待人数</div>
-            </div>
-            <div className="card stat-card">
-              <div className="stat-number" style={{ color: '#16a34a' }}>
-                {queues.reduce((s, d) => s + d.total_completed, 0)}
-              </div>
-              <div className="stat-desc">总已完成</div>
-            </div>
-            <div className="card stat-card">
-              <div className="stat-number">{queues.length}</div>
-              <div className="stat-desc">科室数</div>
-            </div>
-            <div className="card stat-card">
-              <div className="stat-number">{queues.reduce((s, d) => s + d.doctors.length, 0)}</div>
-              <div className="stat-desc">今日在岗医生</div>
-            </div>
-          </div>
-
-          {queues.map(dept => (
-            <div key={dept.id} className="card mb-16">
-              <div className="card-title">{dept.name}</div>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr><th>医生</th><th>职称</th><th>当前叫号</th><th>当前患者</th><th>等待</th><th>已完成</th></tr>
-                  </thead>
-                  <tbody>
-                    {dept.doctors.map((doc: any) => (
-                      <tr key={doc.id}>
-                        <td className="font-bold">{doc.name}</td>
-                        <td>{doc.title}</td>
-                        <td className="text-primary font-bold">{doc.current_number || '-'}</td>
-                        <td>{doc.current_patient || '-'}</td>
-                        <td><span className="badge badge-warning">{doc.waiting}</span></td>
-                        <td><span className="badge badge-success">{doc.completed}</span></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          ))}
-        </>
-      ) : stats && (
-        <>
-          <div className="grid grid-4 mb-24">
-            <div className="card stat-card">
-              <div className="stat-number">{stats.total?.total || 0}</div>
-              <div className="stat-desc">总挂号量</div>
-            </div>
-            <div className="card stat-card">
-              <div className="stat-number" style={{ color: '#16a34a' }}>{stats.total?.completed || 0}</div>
-              <div className="stat-desc">已完成</div>
-            </div>
-            <div className="card stat-card">
-              <div className="stat-number" style={{ color: '#f59e0b' }}>{(stats.total?.waiting || 0) + (stats.total?.serving || 0)}</div>
-              <div className="stat-desc">进行中</div>
-            </div>
-            <div className="card stat-card">
-              <div className="stat-number" style={{ color: '#dc2626' }}>{stats.total?.cancelled || 0}</div>
-              <div className="stat-desc">已取消</div>
-            </div>
-          </div>
-
-          <div className="card mb-16">
-            <div className="card-title">各科室挂号量</div>
-            <div className="table-wrap">
-              <table>
-                <thead><tr><th>科室</th><th>总挂号量</th><th>已完成</th></tr></thead>
-                <tbody>
-                  {stats.by_department?.map((d: any, i: number) => (
-                    <tr key={i}>
-                      <td className="font-bold">{d.department_name}</td>
-                      <td>{d.total}</td>
-                      <td className="text-success">{d.completed}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <div className="card">
-            <div className="card-title">每日明细</div>
-            <div className="table-wrap">
-              <table>
-                <thead><tr><th>日期</th><th>科室</th><th>总数</th><th>已完成</th><th>已取消</th><th>进行中</th></tr></thead>
-                <tbody>
-                  {stats.daily?.map((d: any, i: number) => (
-                    <tr key={i}>
-                      <td>{d.date}</td>
-                      <td>{d.department_name}</td>
-                      <td>{d.total}</td>
-                      <td className="text-success">{d.completed}</td>
-                      <td className="text-danger">{d.cancelled}</td>
-                      <td>{d.pending}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </>
       )}
     </div>
   );

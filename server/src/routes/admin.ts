@@ -99,11 +99,197 @@ router.get('/patients', authMiddleware(['admin']), (_req: Request, res: Response
 // List all doctors (admin)
 router.get('/doctors', authMiddleware(['admin']), (_req: Request, res: Response) => {
   const doctors = db.prepare(`
-    SELECT d.id, d.username, d.name, d.title, dep.name as department_name
+    SELECT d.id, d.username, d.name, d.title, dep.name as department_name, dep.id as department_id
     FROM doctors d JOIN departments dep ON d.department_id = dep.id
     ORDER BY dep.id, d.id
   `).all();
   res.json(doctors);
+});
+
+// ============ Schedule Management ============
+
+// Get schedules with filters (department, date, doctor)
+router.get('/schedules', authMiddleware(['admin']), (req: Request, res: Response) => {
+  const { department_id, doctor_id, date } = req.query;
+
+  let sql = `
+    SELECT ts.id, ts.doctor_id, ts.date, ts.start_time, ts.end_time, ts.max_appointments, ts.current_appointments,
+           d.name as doctor_name, d.title as doctor_title,
+           dep.id as department_id, dep.name as department_name
+    FROM time_slots ts
+    JOIN doctors d ON ts.doctor_id = d.id
+    JOIN departments dep ON d.department_id = dep.id
+    WHERE 1=1
+  `;
+  const params: any[] = [];
+
+  if (department_id) {
+    sql += ' AND dep.id = ?';
+    params.push(department_id);
+  }
+  if (doctor_id) {
+    sql += ' AND d.id = ?';
+    params.push(doctor_id);
+  }
+  if (date) {
+    sql += ' AND ts.date = ?';
+    params.push(date);
+  }
+
+  sql += ' ORDER BY dep.id, d.id, ts.date, ts.start_time';
+
+  const schedules = db.prepare(sql).all(...params);
+  res.json(schedules);
+});
+
+// Get doctors by department (for schedule form)
+router.get('/schedules/doctors/:departmentId', authMiddleware(['admin']), (req: Request, res: Response) => {
+  const departmentId = Number(req.params.departmentId);
+  const doctors = db.prepare(`
+    SELECT id, name, title FROM doctors WHERE department_id = ? ORDER BY id
+  `).all(departmentId);
+  res.json(doctors);
+});
+
+// Create a single time slot
+router.post('/schedules', authMiddleware(['admin']), (req: Request, res: Response) => {
+  const { doctor_id, date, start_time, end_time, max_appointments } = req.body;
+
+  if (!doctor_id || !date || !start_time || !end_time) {
+    res.status(400).json({ message: '缺少必要参数' });
+    return;
+  }
+
+  const max = max_appointments || 10;
+
+  // Check for overlapping slots
+  const existing = db.prepare(`
+    SELECT * FROM time_slots
+    WHERE doctor_id = ? AND date = ?
+      AND ((start_time < ? AND end_time > ?)
+        OR (start_time < ? AND end_time > ?)
+        OR (start_time >= ? AND end_time <= ?))
+  `).get(doctor_id, date, end_time, start_time, end_time, start_time, start_time, end_time) as any;
+
+  if (existing) {
+    res.status(400).json({ message: '该时段与已有排班冲突' });
+    return;
+  }
+
+  const result = db.prepare(`
+    INSERT INTO time_slots (doctor_id, date, start_time, end_time, max_appointments, current_appointments)
+    VALUES (?, ?, ?, ?, ?, 0)
+  `).run(doctor_id, date, start_time, end_time, max);
+
+  res.json({ id: Number(result.lastInsertRowid), message: '排班创建成功' });
+});
+
+// Batch create time slots for a doctor on a date
+router.post('/schedules/batch', authMiddleware(['admin']), (req: Request, res: Response) => {
+  const { doctor_id, date, slots } = req.body;
+
+  if (!doctor_id || !date || !Array.isArray(slots) || slots.length === 0) {
+    res.status(400).json({ message: '缺少必要参数' });
+    return;
+  }
+
+  let created = 0;
+  let skipped = 0;
+  const errors: string[] = [];
+
+  const txn = db.transaction(() => {
+    for (const slot of slots) {
+      const { start_time, end_time, max_appointments } = slot;
+      if (!start_time || !end_time) {
+        skipped++;
+        continue;
+      }
+
+      const max = max_appointments || 10;
+
+      const existing = db.prepare(`
+        SELECT id FROM time_slots
+        WHERE doctor_id = ? AND date = ?
+          AND ((start_time < ? AND end_time > ?)
+            OR (start_time < ? AND end_time > ?)
+            OR (start_time >= ? AND end_time <= ?))
+      `).get(doctor_id, date, end_time, start_time, end_time, start_time, start_time, end_time);
+
+      if (existing) {
+        skipped++;
+        errors.push(`${start_time}-${end_time} 已存在或冲突`);
+        continue;
+      }
+
+      db.prepare(`
+        INSERT INTO time_slots (doctor_id, date, start_time, end_time, max_appointments, current_appointments)
+        VALUES (?, ?, ?, ?, ?, 0)
+      `).run(doctor_id, date, start_time, end_time, max);
+      created++;
+    }
+  });
+  txn();
+
+  res.json({
+    message: `批量处理完成：成功 ${created} 条，跳过 ${skipped} 条`,
+    created,
+    skipped,
+    errors,
+  });
+});
+
+// Delete a time slot
+router.delete('/schedules/:id', authMiddleware(['admin']), (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+
+  const slot = db.prepare('SELECT * FROM time_slots WHERE id = ?').get(id) as any;
+  if (!slot) {
+    res.status(404).json({ message: '时段不存在' });
+    return;
+  }
+
+  // Check if there are existing appointments
+  const apptCount = db.prepare(
+    "SELECT COUNT(*) as count FROM appointments WHERE slot_id = ? AND status != 'cancelled'"
+  ).get(id) as any;
+
+  if (apptCount.count > 0) {
+    res.status(400).json({ message: `该时段已有 ${apptCount.count} 个有效预约，无法删除` });
+    return;
+  }
+
+  db.prepare('DELETE FROM time_slots WHERE id = ?').run(id);
+  res.json({ message: '排班已删除' });
+});
+
+// Delete all slots for a doctor on a date (no appointments only)
+router.delete('/schedules', authMiddleware(['admin']), (req: Request, res: Response) => {
+  const { doctor_id, date } = req.body;
+
+  if (!doctor_id || !date) {
+    res.status(400).json({ message: '缺少参数' });
+    return;
+  }
+
+  const slotsWithAppt = db.prepare(`
+    SELECT ts.id, COUNT(a.id) as appt_count
+    FROM time_slots ts
+    LEFT JOIN appointments a ON a.slot_id = ts.id AND a.status != 'cancelled'
+    WHERE ts.doctor_id = ? AND ts.date = ?
+    GROUP BY ts.id
+    HAVING appt_count > 0
+  `).all(doctor_id, date) as any[];
+
+  if (slotsWithAppt.length > 0) {
+    res.status(400).json({ message: `有 ${slotsWithAppt.length} 个时段存在有效预约，无法删除` });
+    return;
+  }
+
+  const result = db.prepare(
+    'DELETE FROM time_slots WHERE doctor_id = ? AND date = ?'
+  ).run(doctor_id, date);
+
+  res.json({ message: `已删除 ${result.changes} 个时段` });
 });
 
 export default router;
