@@ -73,48 +73,12 @@ for (const [username, password, name, phone, idCard] of patients) {
   patStmt.run(username, bcrypt.hashSync(password, salt), name, phone, idCard);
 }
 
-// Generate time slots for today and next 6 days
-const slotStmt = db.prepare(
-  'INSERT INTO time_slots (doctor_id, date, start_time, end_time, max_appointments) VALUES (?, ?, ?, ?, ?)'
-);
-
-const today = new Date();
-for (let d = 0; d < 7; d++) {
-  const date = new Date(today);
-  date.setDate(today.getDate() + d);
-  const dateStr = date.toISOString().slice(0, 10);
-
-  const morningSlots = [
-    ['08:00', '08:30'],
-    ['08:30', '09:00'],
-    ['09:00', '09:30'],
-    ['09:30', '10:00'],
-    ['10:00', '10:30'],
-    ['10:30', '11:00'],
-    ['11:00', '11:30'],
-  ];
-  const afternoonSlots = [
-    ['14:00', '14:30'],
-    ['14:30', '15:00'],
-    ['15:00', '15:30'],
-    ['15:30', '16:00'],
-    ['16:00', '16:30'],
-    ['16:30', '17:00'],
-  ];
-
-  for (const docId of Object.values(docIds)) {
-    for (const [start, end] of [...morningSlots, ...afternoonSlots]) {
-      slotStmt.run(docId, dateStr, start, end, 10);
-    }
-  }
-}
-
 console.log('种子数据初始化完成！');
 console.log(`  - ${departments.length} 个科室`);
 console.log(`  - ${doctors.length} 位医生`);
 console.log(`  - ${patients.length} 位患者`);
 console.log('  - 1 位管理员 (admin / admin123)');
-console.log('  - 7 天的预约时段');
+console.log('  - 请登录管理员后台配置排班');
 console.log('\n测试账号:');
 console.log('  患者: patient_zhang / 123456');
 console.log('  医生: doc_wang / 123456');

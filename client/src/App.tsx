@@ -854,6 +854,7 @@ function ScheduleManagement() {
   const { show } = useToast();
   const [departments, setDepartments] = useState<Department[]>([]);
   const [doctors, setDoctors] = useState<Doctor[]>([]);
+  const [createDoctors, setCreateDoctors] = useState<Doctor[]>([]);
   const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [filters, setFilters] = useState({
@@ -870,7 +871,7 @@ function ScheduleManagement() {
     end_time: '08:30',
     max_appointments: 10,
     // Batch fields
-    period: 'morning' as 'morning' | 'afternoon' | 'full',
+    period: 'full' as 'morning' | 'afternoon' | 'full',
     slot_duration: 30,
     slot_max: 10,
   });
@@ -890,7 +891,7 @@ function ScheduleManagement() {
 
   useEffect(() => {
     if (createForm.department_id) {
-      api.getSchedulesDoctors(Number(createForm.department_id)).then(setDoctors as any).catch(() => {});
+      api.getSchedulesDoctors(Number(createForm.department_id)).then(setCreateDoctors as any).catch(() => {});
     }
   }, [createForm.department_id]);
 
@@ -1061,7 +1062,7 @@ function ScheduleManagement() {
             <select className="form-input" value={createForm.doctor_id} disabled={!createForm.department_id}
               onChange={e => setCreateForm({ ...createForm, doctor_id: e.target.value })}>
               <option value="">请选择医生</option>
-              {doctors.map(d => <option key={d.id} value={d.id}>{d.name} ({d.title})</option>)}
+              {createDoctors.map(d => <option key={d.id} value={d.id}>{d.name} ({d.title})</option>)}
             </select>
           </div>
           <div className="form-group" style={{ margin: 0, minWidth: 180 }}>
